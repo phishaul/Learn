@@ -1,0 +1,1730 @@
+#!/bin/bash
+#By Phishaul  KVM管理脚本
+#2020年8月20日开始编写此脚本
+
+########-------------------------------ntice----------------------------############
+####1.此脚本是为了管理KVM虚拟机,使用前请保证已正确安装KVM相关程序.
+####2.屏幕缩小到不足以容纳管理界面字符数时,会出现字符超出界面的问题,拉宽界面,重新运行脚本即可解决.
+####3.脚本中用到的KVM管理命令都需要root权限,因此,此脚本需要以root权限执行
+
+########～～～～～～～～～～～～～～～～～～root权限验证～～～～～～～～～～～～～～～#############
+username=`whoami`
+if [ $username != root ]
+then
+    echo "检测到脚本未运行在root权限下，请使用root用户或者sudo权限执行脚本！"
+    exit
+fi
+########～～～～～～～～～～～～～～～～～～root权限验证～～～～～～～～～～～～～～～#############
+SCRIPT_HOME=$(dirname $0)               #此脚本所在位置
+#################创建首页管理界面时用到的变量##########################
+##取当前屏幕数据
+screen_col=`tput cols`		#取屏幕列值
+screen_line=`tput lines`	#取屏幕行值
+#定义管理界面数据
+inface_col=$[$screen_col/2] #管理界面列值  
+inface_line=15              #管理界面行数     
+#col_word_num=$[$inface_col/2-1]
+############################需要自定义的变量值##########################
+PATH_IMG=/home/Disk-e/kvmimags      ###虚拟机镜像文件位置
+PATH_ISO=/home/Disk-e/Packages      ###安装光盘镜像所在的目录
+NANE_ISO=CentOS-7.4.iso             ####本次创建虚拟机时，使用的操作系统安装镜像的名称
+PATH_KS=/home/phishaul              ###创建虚拟机时，使用ks文件的默认位置（ks文件名默认为ks.cfg）
+MEM_MIN_SIZE=1024       #创建虚拟机时，内存的大小，单位为M
+MEM_MAX_SIZE=4096       #创建虚拟机时，内存的大小，单位为M
+CPU_MIN_NUM=1       #创建虚拟机时，CPU的个数，单位为个
+CPU_MAX_NUM=4       #创建虚拟机时，CPU的个数，单位为个
+DISK_SIZE=8         #创建虚拟机时，硬盘的大小，单位为G
+BIRDGE_MODE=virbr1  #创建虚拟机时，选择的网络连接方式。网络连接方式可以选择桥接,NAT和仅主机模式,不同的模式对应的本机网卡名称不一样,此处选择的virbr1为NAT模式的网卡
+PATH_XML=/etc/libvirt/qemu              #####虚拟机配置文件的位置
+SOURCE_HOST=kylin3.2                 #####母版虚拟机的名称
+#####################################################################
+
+
+#定义函数----------------------------------暂时用不上---------------------------#######
+shangxiajuzhong(){			#清空屏幕,光标上下居中		
+	clear
+	tput cup $(($screen_line/2)) 
+}
+zuoyoujuzhong(){			#清空屏幕,光标左右居中		
+	clear
+	tput cup 0 $(($screen_col/2)) 
+}
+xiayi(){			#光标下移至($screen_line/2+1,$screen_col/4)
+	tput cup $(($screen_line/2+1)) $(($screen_col/4))
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~判断函数~~~~~~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_judge(){
+    result=""
+    judge=$1
+    for ((i=0;i<3;i++))             
+    do
+        #read -p "" judge
+        if [ "$judge" == "y" ]
+        then
+            result=1                                                          #判断结果正确,输出result=1
+            break
+        elif [ "$judge" == "n" ]
+        then
+            result=0                                                          #判断结果正确,输出result=0
+            break
+        else
+           j=$[$i+1]
+            if [ $j -lt 3 ]
+            then
+                echo "输入错误$j次,您还有$[3-$j]次机会,请重新输入!"                 #3次输入机会,输入次数过多,会自动退出脚本
+                read -p "请重新输入（y|n）:" judge
+            else
+                result=2                                                       #输入错误次数过多,输出result=2
+            fi
+        fi
+    done
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~判断函数~~~~~~~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~输入内容为纯数字函数~~~~~~~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_is_number(){
+    #####判断输入内容为纯数字#####################
+    unset isnum_times
+    isnum_times=0
+    if ! echo $1 |grep ^[0-9][0-9]*$
+    then
+        clear
+        shangxiajuzhong
+        echo "输入有误,请重新输入!"
+        isnum_times=$[$isnum_times+1]
+        if [ $isnum_times -eq 5 ]
+        then
+            echo "输入错误次数过多,已退出!"
+            sleep 1
+            exit
+        fi
+    fi
+    ###############################################
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~输入内容为纯数字函数~~~~~~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~输入内容非空函数~~~~~~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_is_null(){
+    #####判断输入内容非空#####################
+    unset isnull_times
+    isnull_times=0
+    input_is_null=$1
+    while true
+    do
+        if [ -n "$input_is_null" ]              ######如果字符为空
+        then
+            break                
+        else
+            isnull_times=$[$isnull_times+1]
+            if [ $isnull_times -eq 5 ]
+            then
+                echo "输入错误次数过多,已退出!"
+                sleep 1
+                exit
+            fi
+            read -p "输入有误,请重新输入:" input_is_null
+        fi
+    done
+    ###############################################
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~输入内容非空函数~~~~~~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~输入内容为ip地址函数~~~~~~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_is_ipaddr(){
+    #####判断输入内容为ip地址#####################
+    unset isip_times
+    isip_times=0
+    ipaddr_new=$1
+    while true
+    do
+        echo $ipaddr_new| egrep -x  "([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])" &>/dev/null
+        if [ $? -eq 0 ]              ######如果输入内容为ip地址
+        then
+            break                
+        else
+            isip_times=$[$isip_times+1]
+            if [ $isip_times -eq 5 ]
+            then
+                echo "输入错误次数过多,已退出!"
+                sleep 1
+                exit
+            fi
+            read -p "输入有误,请重新输入:" ipaddr_new
+        fi
+    done
+    ###############################################
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~输入内容为ip地址函数~~~~~~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~修改UUID值函数~~~~~~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_change_uuid(){
+    uuid=`sed -n "/uuid/p" $PATH_XML/$1 |awk -F"[<|>]" '{print $3}'`                     #取旧的uuid值
+    uuid_5=`echo $uuid|awk -F- '{print $5}'`
+    uuid_5_new=`date "+%y%m%d%H%M%S"`                                                               #定义新的uuid值
+    sed -i "/uuid/s/$uuid_5/$uuid_5_new/g" $PATH_XML/$1                                  #改uuid值  
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~修改UUID值函数~~~~~~~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~修改MAC值函数~~~~~~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_change_mac(){
+    mac=`sed -n "/mac address/p" $PATH_XML/$1 |awk -F\' '{print $2}'`                    #取旧的mac值
+    mac_3=`echo $mac | awk -F: '{print $4":"$5":"$6}'`
+    mac_3_new=`date "+%H:%M:%S"`
+    mac_new=`echo $mac |awk -F: '{print $1":"$2":"$3":""'"$mac_3_new"'"}'`                          #定义新的mac值
+    sed -i "s/$mac/$mac_new/g" $PATH_XML/$1                                              #改mac值
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~修改MAC值函数~~~~~~~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~首页管理界面函数~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_frame(){
+    ##########边框函数:制定界面方框函数##################################
+	#第一行左侧空白为$screen_col/4,再打印$screen_col/2个#号
+	#从第二行开始,左侧空白为$screen_col/4,打印一个#,再打印$screen_col/2-2个空白,再打印一个#
+	clear           #清空屏幕
+	tput cup $(($screen_line/5)) $(($screen_col/4))     #光标定位到($screen_line/5,$screen_col/4)
+	#循环打印第一行
+	for ((i=1;i<=$screen_col/2;i++))
+	do
+		echo -n '#'
+	done
+	#循环打印第二行至倒数第二行
+	for ((i=1;i<=$[$inface_line-2];i++))            #循环行数,总计$inface_line-2行
+	do
+	    tput cup $(($screen_line/5+$i)) $(($screen_col/4))
+	    echo -n "#"
+        tput cup $(($screen_line/5+$i)) $(($screen_col*3/4-1))
+	    echo "#"                                    #打印每行最后一个#
+	done
+	#循环打印最后一行
+	tput cup $(($screen_line/5+$inface_line-1)) $(($screen_col/4))          #定位到最后一行
+	for ((n=1;n<=$screen_col/2;n++))
+	do
+	    echo -n "#"
+	done
+}
+def_home_content(){
+	###################首页内容函数:填写方框内选项###########################################
+	unset list_                #取消定义数组list_
+    ##将每一行的内容写入到数组
+	list_[0]="1.列举所有虚拟机"
+	list_[1]="2.创建虚拟机"
+	list_[2]="3.克隆虚拟机"
+	list_[3]="4.启动虚拟机"
+	list_[4]="5.关闭虚拟机"
+	list_[5]="6.删除虚拟机"
+	list_[6]="7.迁移虚拟机"
+    list_[7]="8.编辑虚拟机"
+    list_[8]="9.自定义脚本变量"
+    list_[9]="10.退出"
+}
+def_print_content(){
+	####################打印内容函数:循环输出数组到每一行######################################
+	for ((m=0;m<=$[$inface_line-2];m++))            #循环数组每个数值,总计可以循环$inface_line-2个
+	do
+	    list_num=${#list_[@]}
+	    if [ $list_num -lt $(($inface_line/2)) ]    #如果数组太少,会显得数据集中到上半部分,可以隔一行显示一次,否则,就不必了
+	    then
+	        k=$[$m*2]                                 
+	    else
+	        k=m
+	    fi
+	    tput cup $(($screen_line/5+$k+2)) $(($screen_col/2-10))        #光标定位到第$i行的方框第一个#号后的第3个字符处
+	    echo ${list_[$m]}
+	done
+    tput civis                                                          #光标不可见
+    tput cup $(($screen_line/5+$inface_line+5)) $(($screen_col/4))
+	####################执行操作函数:定义需要执行的操作的编号###################
+    unset oper_num
+    tput cnorm                                                           #光标可见
+    echo -n "请输入您要执行的操作编号,"
+    read -p "输入内容必须为数字:" oper_num                           #输入需要执行的操作编号
+    def_is_number $oper_num                                      #调用判断输入内容为纯数字函数
+}
+def_home_choice(){
+    #########首页选择函数：定义根据首页的选项执行什么操作###########
+    echo
+    tput cup $(($screen_line/5+$inface_line+7)) $(($screen_col/4))
+    echo "您要执行的操作为${list_[$oper_num-1]}"
+    shangxiajuzhong
+    case $oper_num in
+    1)                                      ####列举所有虚拟机
+        virsh list --all
+        read -p "按任意键返回首页:" home_null
+        def_home
+    ;;
+    2)                                      ####创建虚拟机
+        def_create_host;;
+    3)                                      ####克隆虚拟机
+        def_clone_host;;
+    4)                                      ####启动虚拟机
+        def_start_host;;
+    5)                                      ####关闭虚拟机
+        def_stop_host;;
+    6)                                      ####删除虚拟机
+        def_delete_host;;
+    7)                                      ####迁移虚拟机
+        def_move_host;;
+    8)                                      ####修改虚拟机配置
+        def_modify_host;;
+        #echo "功能正在完善，敬请期待！";;
+    9)                                      ####自定义脚本变量
+        def_cust_env;;
+    10)                                      ####
+        exit;;
+    *)
+        echo "输入错误，你只能输入数字[1-8]！！！"
+    esac
+}
+def_home(){
+	def_frame
+	def_home_content
+	def_print_content
+    def_home_choice
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~首页管理界面函数~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~虚拟机列表函数~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_host_list(){
+    #######将取到的虚拟机名称定义到数组中
+    arr_host_list=(`virsh list --all |sed '1,2d'|sed '/^$/d' |awk '{print $2}'`)
+    arr_host_list_num=${#arr_host_list[@]}
+    arr_hoststatus_list=(`virsh list --all |sed '1,2d'|sed '/^$/d' |awk '{print $3$4}'`)
+    echo -e "Id\tName\t\t\tState"
+    echo "-----------------------------------------"
+    for ((host_num=0;host_num<$arr_host_list_num;host_num++))
+    do
+        echo -e "$[$host_num+1]\t${arr_host_list[$host_num]}\t\t${arr_hoststatus_list[$host_num]}"
+    done
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~虚拟机列表函数~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~创建虚拟机函数~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_create_content1(){
+    ###################创建内容函数,填写方框内选项###########################################
+    unset list_                #取消定义数组list_
+    ##将每一行的内容写入到数组
+    list_[0]="1.创建CentOS主机"
+    list_[1]="2.创建Kylin3.2主机"
+    list_[2]="3.创建Kylin3.3主机"
+    list_[3]="4.创建kali主机"
+    list_[4]="5.命令行界面自动创建一台虚拟机"
+    list_[5]="6.后台安装一台虚拟机"
+    list_[6]="7.返回主界面"
+    list_[7]="8.退出"
+    #list_[8]="9."
+}
+def_create_content2(){
+    ###################创建内容函数,填写方框内选项###########################################
+    unset list_                #取消定义数组list_
+    list_[0]="1.列举所有虚拟机"
+    list_[1]="2.图形界面手动创建一台虚拟机"
+    list_[2]="3.图形界面自动创建一台虚拟机"
+    list_[3]="4.命令行界面手动创建一台虚拟机"
+    list_[4]="5.命令行界面自动创建一台虚拟机"
+    list_[5]="6.后台安装一台虚拟机"
+    list_[6]="7.返回主界面"
+    list_[7]="8.退出"
+    #list_[8]="9."
+}
+def_create_host(){
+	#创建虚拟机是指无图形安装虚拟机,此脚本只测试了使用命令行安装CentOS7.4操作系统,其它操作系统未测试。
+	#此脚本是为KVM虚拟机使用的,安装时使用本地iso镜像,其他安装方式,请自行修改脚本,另外,自动应答文件和此脚本在同一个位置放置。
+	#创建虚拟机时，由于创建完会自动使用console连接虚拟机，所以每次只能创建一台虚拟机,以后可以试试使用PXE批量创建虚拟机。
+    ###########要创建的虚拟机内存,CPU,硬盘等大小可以通过修改变量值和ks.cfg文件来修改为自己需要的参数########################
+    clear
+    shangxiajuzhong
+    echo "此处创建虚拟机是指采用无图形方式安装虚拟机,每次只能创建一台，且将会花费很长时间,建议您选择一个母版主机,克隆您需要的虚拟机."
+    #echo ""
+    arr_host_list=(`virsh list --all |sed '1,2d'|sed '/^$/d' |awk '{print $2}'`)
+    read -p "是否仍然要创建虚拟机,是请输入y,否请输入n:" judge
+    ##########调用判断函数,根据输入的judge值,返回不同的result值,下面会根据result值来判断是否创建虚拟机#########
+    def_judge $judge
+    ##########根据def_judge函数返回的result值来判断是否创建虚拟机
+    if [ $result -eq 1 ]
+    then
+    	echo "暂时每次只能创建一台虚拟机"    
+        while true
+        do
+            def_frame                               ###调用边框函数
+            def_create_content1                     ###调用创建内容函数
+            def_print_content                       ###调用打印内容函数
+            echo
+            tput cup $(($screen_line/5+$inface_line+7)) $(($screen_col/4))      
+            echo "您要执行的操作为${list_[$oper_num-1]}"
+            shangxiajuzhong                         ###光标上下居中
+            case $oper_num in
+            1)                              #创建CentOS主机
+                while true
+                do
+                    def_frame                               ###调用边框函数
+                    def_create_content2                     ###调用创建内容函数
+                    def_print_content                       ###调用打印内容函数
+                    echo
+                    tput cup $(($screen_line/5+$inface_line+7)) $(($screen_col/4))      
+                    echo "您要执行的操作为${list_[$oper_num-1]}"
+                    shangxiajuzhong
+                    case $oper_num in
+                    1)                      ###列举所有虚拟机
+                        virsh list --all
+                        read -p "按任意键返回克隆虚拟机操作：" create_null
+                        tput sc                         ###保存光标位置
+                    ;;
+                    2)                              #图形界面手动创建一台虚拟机
+                        echo "此操作需要使用X11服务，如未开启，则会创建失败！"
+                        while true
+                        do
+                            read -p "请输入您要创建主机的主机名,主机名将会和虚拟机名称一致:" hname
+                            if echo ${arr_host_list[@]} | grep $hname &>/dev/null
+                            then
+                                echo "输入的主机名已存在，请重新输入："
+                                continue
+                            else
+                                shangxiajuzhong                         ###光标上下居中
+                                echo "开始创建虚拟机,创建过程会花费很长时间,请耐心等待......"
+                                read -p "任意键开始安装：" install_null
+                                #virt-install --name $hname --graphics vnc,listen=0.0.0.0,port=5910,keymap=en_us --memory=$MEM_MIN_SIZE,maxmemory=$MEM_MAX_SIZE --vcpus=$CPU_MIN_NUM,maxvcpus=$CPU_MAX_NUM --disk path=$PATH_IMG/$hname.img,size=$DISK_SIZE,format=qcow2 --network bridge=$BIRDGE_MODE --location=$PATH_ISO/$NANE_ISO --extra-args="console=tty0" #console=ttyS0,115200n8 edd=off"
+                                virt-install --name $hname --graphics vnc --memory=$MEM_MIN_SIZE,maxmemory=$MEM_MAX_SIZE --vcpus=$CPU_MIN_NUM,maxvcpus=$CPU_MAX_NUM --disk path=$PATH_IMG/$hname.img,size=$DISK_SIZE,format=qcow2 --network bridge=$BIRDGE_MODE --location=$PATH_ISO/$NANE_ISO --extra-args="console=tty0"
+                                if virsh list --all | grep $hname  &>/dev/nulls
+                                then
+                                    echo "创建完成！"
+                                else
+                                    echo "创建失败！"
+                                fi
+                                virsh destroy $hname
+                                guestmount -a $PATH_IMG/$hname.img -i /mnt
+                                sed -i "s/tty0/ttyS0/g" /mnt/boot/grub2/grub.cfg            ###打开虚拟机串口
+                                umount /mnt
+                            fi
+                            read -p  "是否还要继续创建虚拟机:(y/n)" judge
+                            def_judge $judge
+                            if [ $result -eq 0 ]
+                            then
+                                break                       #####跳出图形界面手动创建一台虚拟机，返回创建CentOS主机界面。
+                            elif [ $result -eq 2 ]
+                            then
+                                echo "输入错误次数过多，已退出!"
+                                sleep 1
+                                break 3                     #####跳出创建虚拟机函数，返回到首页。
+                            fi
+                        done
+                    ;;
+                    3)                              #图形界面自动创建一台虚拟机
+                        echo "此操作需要使用X11服务，如未开启，则会创建失败！"
+                        echo "此操作需要使用自动应答文件，请确保自动应答文件正确，否则需要手动创建虚拟机！"
+                        while true
+                        do
+                            read -p "请输入您要创建主机的主机名,主机名将会和虚拟机名称一致:" hname
+                            if echo ${arr_host_list[@]} | grep $hname &>/dev/null
+                            then
+                                echo "输入的主机名已存在，请重新输入："
+                                continue
+                            else
+                                shangxiajuzhong                         ###光标上下居中
+                                echo "开始创建虚拟机,创建过程会花费很长时间,请耐心等待......"
+                                read -p "请输入自动应答文件名称：" ks_name
+                                virt-install --name $hname --graphics vnc,listen=0.0.0.0,port=5910,keymap=en_us --memory=$MEM_MIN_SIZE,maxmemory=$MEM_MAX_SIZE --vcpus=$CPU_MIN_NUM,maxvcpus=$CPU_MAX_NUM --disk path=$PATH_IMG/$hname.img,size=$DISK_SIZE,format=qcow2 --network bridge=$BIRDGE_MODE --location=$PATH_ISO/$NANE_ISO --initrd-inject=$PATH_KS/$ks_name --extra-args="ks=file:/$ks_name console=ttyS0" --noreboot
+                                if virsh list --all | grep $hname &>/dev/null 
+                                then
+                                    echo "创建完成！"
+                                else
+                                    echo "创建失败！"
+                                fi
+                            fi
+                            read -p  "是否还要继续创建虚拟机:(y/n)" judge
+                            def_judge $judge
+                            if [ $result -eq 0 ]
+                            then
+                                break
+                            elif [ $result -eq 2 ]
+                            then
+                                echo "输入错误次数过多，已退出!"
+                                sleep 1
+                                break 2
+                            fi
+                        done
+                    ;;
+                    4)                              #命令行界面手动创建一台虚拟机
+                        echo "此操作需要在终端界面手动配置安装选项，创建完成会自动连接到虚拟机console口！"
+                        while true
+                        do
+                            read -p "请输入您要创建主机的主机名,主机名将会和虚拟机名称一致:" hname
+                            if echo ${arr_host_list[@]} | grep $hname &>/dev/null
+                            then
+                                echo "输入的主机名已存在，请重新输入："
+                                continue
+                            else
+                                shangxiajuzhong                         ###光标上下居中
+                                echo "开始创建虚拟机,创建过程会花费很长时间,请耐心等待......"
+                                read -p "任意键开始安装：" install_null
+                                virt-install --name $hname --nographics --memory=$MEM_MIN_SIZE,maxmemory=$MEM_MAX_SIZE --vcpus=$CPU_MIN_NUM,maxvcpus=$CPU_MAX_NUM --disk path=$PATH_IMG/$hname.img,size=$DISK_SIZE,format=qcow2 --network bridge=$BIRDGE_MODE --location=$PATH_ISO/$NANE_ISO --extra-args="console=ttyS0" --noreboot
+                                if virsh list --all | grep $hname &>/dev/null
+                                then
+                                    echo "创建完成！"
+                                else
+                                    echo "创建失败！"
+                                fi
+                            fi
+                            read -p  "是否还要继续创建虚拟机:(y/n)" judge
+                            def_judge $judge
+                            if [ $result -eq 0 ]
+                            then
+                                break
+                            elif [ $result -eq 2 ]
+                            then
+                                echo "输入错误次数过多，已退出!"
+                                sleep 1
+                                break 2
+                            fi
+                        done
+                    ;;
+                    5)                              #命令行界面自动创建一台虚拟机
+                        echo "此操作需要使用自动应答文件，请确保自动应答文件正确，否则需要手动创建虚拟机！"
+                        while true
+                        do
+                            read -p "请输入您要创建主机的主机名,主机名将会和虚拟机名称一致:" hname
+                            if echo ${arr_host_list[@]} | grep $hname &>/dev/null
+                            then
+                                echo "输入的主机名已存在，请重新输入："
+                                continue
+                            else
+                                shangxiajuzhong                         ###光标上下居中
+                                echo "开始创建虚拟机,创建过程会花费很长时间,请耐心等待......"
+                                read -p "请输入自动应答文件名称：" ks_name
+                                def_is_null $ks_name
+                                virt-install --name $hname --nographics --memory=$MEM_MIN_SIZE,maxmemory=$MEM_MAX_SIZE --vcpus=$CPU_MIN_NUM,maxvcpus=$CPU_MAX_NUM --disk path=$PATH_IMG/$hname.img,size=$DISK_SIZE,format=qcow2 --network bridge=$BIRDGE_MODE --location=$PATH_ISO/$NANE_ISO --initrd-inject=$PATH_KS/$ks_name --extra-args="ks=file:/$ks_name console=ttyS0" --noreboot
+                                if virsh list --all | grep $hname &>/dev/null
+                                then
+                                    echo "创建完成！"
+                                else
+                                    echo "创建失败！"
+                                fi
+                            fi
+                            read -p  "是否还要继续创建虚拟机:(y/n)" judge
+                            def_judge $judge
+                            if [ $result -eq 0 ]
+                            then
+                                break
+                            elif [ $result -eq 2 ]
+                            then
+                                echo "输入错误次数过多，已退出!"
+                                sleep 1
+                                break 2
+                            fi
+                        done
+                    ;;
+                    6)                              #后台安装一台虚拟机
+                        echo "此操作需要使用自动应答文件，请确保自动应答文件正确，否则需要手动创建虚拟机！"
+                        while true
+                        do
+                            read -p "请输入您要创建主机的主机名,主机名将会和虚拟机名称一致:" hname
+                            def_is_null $name
+                            if echo ${arr_host_list[@]} | grep $hname &>/dev/null
+                            then
+                                echo "输入的主机名已存在，请重新输入!"
+                                continue
+                            else
+                                shangxiajuzhong                         ###光标上下居中
+                                echo "开始创建虚拟机,创建过程会花费很长时间,请耐心等待......"
+                                read -p "请输入自动应答文件名称：" ks_name
+                                def_is_null $ks_name
+                                virt-install --name $hname --nographics --noautoconsole --memory=$MEM_MIN_SIZE,maxmemory=$MEM_MAX_SIZE --vcpus=$CPU_MIN_NUM,maxvcpus=$CPU_MAX_NUM --disk path=$PATH_IMG/$hname.img,size=$DISK_SIZE,format=qcow2 --network bridge=$BIRDGE_MODE --location=$PATH_ISO/$NANE_ISO --initrd-inject=$PATH_KS/$ks_name --extra-args="ks=file:/$ks_name console=ttyS0" --noreboot
+                                echo "也可以等待自动安装完成！"
+                                echo "正在创建，请稍等......"
+                                md5_img_old=`md5sum $PATH_IMG/$hname.img`
+                                sleep 60
+                                md5_img_new=`md5sum $PATH_IMG/$hname.img`
+                                while [ "$md5_img_new" != "$md5_img_old" ]
+                                do
+                                    echo "正在创建，请稍等......"
+                                    md5_img_old=$md5_img_new
+                                    sleep 300
+                                    md5_img_new=`md5sum $PATH_IMG/$hname.img`
+                                done
+                                if virsh list --all | grep $hname &>/dev/null
+                                then
+                                    echo "创建完成！"
+                                else
+                                    echo "创建失败！"
+                                fi
+                            fi
+                            read -p  "是否还要继续创建虚拟机:(y/n)" judge
+                            def_judge $judge
+                            if [ $result -eq 0 ]
+                            then
+                                break
+                            elif [ $result -eq 2 ]
+                            then
+                                echo "输入错误次数过多，已退出!"
+                                sleep 1
+                                break 2
+                            fi
+                        done
+                    ;;
+                    7)
+                        echo "返回主界面！"
+                        break 2
+                    ;;
+                    8)
+                        exit
+                    ;;
+                    *)                              #其它
+                        echo "输入错误！"
+                        continue
+                    esac
+                    read -p  "是否还要继续创建虚拟机:(y/n)" judge
+                    def_judge $judge
+                    if [ $result -eq 0 ]
+                    then
+                        break
+                    elif [ $result -eq 2 ]
+                    then
+                        echo "输入错误次数过多，已退出!"
+                        sleep 1
+                        break 2
+                    fi
+                done
+            ;;
+            2)                              #创建Kylin3.2主机
+                echo "功能正在完善，敬请期待！"
+            ;;
+            3)                              #创建Kylin3.3主机
+                echo "功能正在完善，敬请期待！"
+            ;;
+            4)                              #创建kali主机
+                echo "功能正在完善，敬请期待！"
+                #######如果是kali系统，需要开启ssh服务的开机自启动，不然不能远程登录，开启方法如下：########
+                ###ln -sf /etc/systemd/system/sshd.service /lib/systemd/system/ssh.service
+                ###ln -sf /etc/systemd/system/multi-user.target.wants/ssh.service /lib/systemd/system/ssh.service
+                ###sed -i "/^#PermitRootLogin/a\PermitRootLogin yes" /etc/ssh/sshd_config
+            ;;
+            5)                              #返回主页面
+                echo "功能正在完善，敬请期待！"
+            ;;
+            8)
+                exit
+            ;;
+            *)                              #其它
+                echo "输入错误，请重新选择！"
+                break
+            esac
+            #######～～～～～～～调试命令～～～～～～～########
+            #virt-install --name $hname --graphics vnc --memory=$MEM_MIN_SIZE,maxmemory=$MEM_MAX_SIZE --vcpus=$CPU_MIN_NUM,maxvcpus=$CPU_MAX_NUM --disk path=$PATH_IMG/$hname.qcow2,size=$DISK_SIZE,format=qcow2 --network bridge=$BIRDGE_MODE --location=$PATH_ISO/$NANE_ISO --initrd-inject=$PATH_KS/ks.cfg --extra-args="ks=file:/ks.cfg console=ttyS0" --debug
+        done
+    elif [ $result -eq 0 ]
+    then
+        echo "退出创建虚拟机界面,返回管理窗口!"
+    elif [ $result -eq 2 ]
+    then
+        echo "输入错误次数过多,返回管理窗口,请重新选择!"
+    else
+        echo "程序执行错误,请检查程序后重新执行!"
+        sleep 3
+        exit
+    fi
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~创建虚拟机函数~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~克隆虚拟机函数~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_clone_content(){
+    ###################克隆内容函数,填写方框内选项###########################################
+    unset list_                #取消定义数组list_
+    ##将每一行的内容写入到数组
+    list_[0]="1.列举所有虚拟机"
+    list_[1]="2.克隆一台虚拟机"
+    list_[2]="3.克隆一组虚拟机"
+    list_[3]="4.返回主界面"
+    list_[4]="5.退出"
+}
+def_is_shutdown(){
+    #判断虚拟机是否关机
+    STATUS_SOURCE_HOST=`virsh list --all | grep $1 | awk '{print $3,$4}'`
+    if [ "$STATUS_SOURCE_HOST" == "shut off" ]
+    then
+        echo "虚拟机已关机,可以进行操作."
+    else
+        read -p  "虚拟机未关机,是否立即关机,是请输入y,否请输入n:" judge
+        def_judge $judge
+        if [ $result -eq 1 ]
+        then
+            virsh destroy $1
+        elif [ $result -eq 0 ]
+        then
+            echo "不允许关闭虚拟机,不能进行后续操作,退出执行脚本!"
+            sleep 1
+            exit
+        elif [ $result -eq 2 ]
+        then
+            echo "输入错误次数过多,返回管理窗口,请重新选择!"
+
+        else
+            echo "程序执行错误,请检查程序后重新执行!"
+            sleep 3
+            exit
+        fi
+    fi    
+}
+def_clone_host(){
+    clear
+    shangxiajuzhong
+    echo "克隆虚拟机的前提是有一个模板机,此模板机必须能够正常使用,且克隆前是关机状态(即使未关机,此脚本也会强制关闭模板机,未避免造成数据丢失,克隆前请关闭模板机)"
+    read -p "当前的模板机为：$SOURCE_HOST,是否更改模板机，需要更改请输入y,不更改，请输入n："  judge
+    def_judge $judge
+    if [ $result -eq 1 ] 
+    then
+        virsh list --all
+        read -p "请输入新的模板名称：" SOURCE_HOST_NEW
+        def_is_null $SOURCE_HOST_NEW
+        SOURCE_HOST=$SOURCE_HOST_NEW
+    elif [ $result -eq 0 ]
+    then
+        echo "不再更改模板主机！"
+    elif [ $result -eq 2 ]
+    then
+        echo "输入错误次数过多，已退出！"
+        exit
+    fi
+    def_is_shutdown $SOURCE_HOST
+    while true
+    do
+        def_frame                               ###调用边框函数
+        def_clone_content                       ###调用克隆内容函数
+        def_print_content                       ###调用打印内容函数
+        echo
+        tput cup $(($screen_line/5+$inface_line+7)) $(($screen_col/4))      
+        echo "您要执行的操作为${list_[$oper_num-1]}"
+        shangxiajuzhong                         ###光标上下居中
+        case $oper_num in
+        1)                                      ####1.列举所有虚拟机
+            virsh list --all
+            read -p "按任意键返回克隆虚拟机操作：" clone_null
+            tput sc                         ###保存光标位置
+        ;;
+        2)                                      #####2.克隆一台虚拟机
+            #选择克隆的方式, 1.基于前台虚拟机的克隆(相当于完整克隆),2.基于后端镜像创建差量镜像(相当于链接克隆)###########
+            echo "克隆方式有两种,1.基于前台虚拟机的克隆;2.基于后端镜像创建差量镜像."
+            echo "选择第一种方式请输入1,选择第二种方式请输入2，#####退出选择请输入q"
+            while true
+            do
+                read -p "请输入您要选择的克隆方式：" mode_oper
+                case $mode_oper in
+                1)                      ######选择第一种方式
+                    clear
+                    while true
+                    do
+                        arr_host_list=(`virsh list --all |sed '1,2d'|sed '/^$/d' |awk '{print $2}'`)
+                        #clear
+                        virsh list --all
+                        echo "请输入您要克隆主机的主机名,主机名将会和虚拟机名称一致！"
+                        read -p "注意，上面列举的为已存在的主机，请不要输入重复的主机名:" hname
+                        def_is_null $hname
+                        if echo ${arr_host_list[@]} | grep $hname &>/dev/null
+                        then
+                            clear
+                            tput cup 2 0
+                            echo "输入的主机名已存在，请重新输入："
+                            tput cup 5 0
+                            continue
+                        else
+                            clear
+                            echo "开始克隆虚拟机,请耐心等待......"
+                            virt-clone -o $SOURCE_HOST -n $hname -f $PATH_IMG/$hname.img
+                            ###############kylin3.2的主机，克隆后eth0会变成eth1,可将模板的eth0配置删除，或者修复一下##################
+                            guestmount -a $PATH_IMG/$hname.img -i /mnt
+                            sed -i '/eth0/d' /mnt/etc/udev/rules.d/70-persistent-net.rules
+                            sed -i 's/eth1/eth0/g' /mnt/etc/udev/rules.d/70-persistent-net.rules
+                            mac_new_1=`grep "mac " /etc/libvirt/qemu/$hname.xml| awk -F\' '{print $2}'`
+                            sed -ri 's/(HWADDR=)(.*)/\1$mac_new_1/g' /mnt/etc/sysconfig/network-scripts/ifcfg-eth0
+                            umount /mnt
+                            ##################################################################################
+                            echo "$hname主机克隆完成!"
+                            read -p "是否还要继续克隆虚拟机:(y/n)" judge
+                            def_judge $judge
+                            if [ $result -eq 0 ]
+                            then
+                                break 2
+                            elif [ $result -eq 2 ]
+                            then
+                                echo "输入错误次数过多，已退出!"
+                                sleep 1
+                                exit
+                            fi
+                        fi
+                    done
+                ;;
+                2)                      ######选择第二种方式
+                    clear
+                    while true
+                    do
+                        arr_host_list=(`virsh list --all |sed '1,2d'|sed '/^$/d' |awk '{print $2}'`)
+                        #clear
+                        virsh list --all
+                        echo "请输入您要克隆主机的主机名,主机名将会和虚拟机名称一致！"
+                        read -p "注意，上面列举的为已存在的主机，请不要输入重复的主机名:" hname
+                        def_is_null $hname
+                        if echo ${arr_host_list[@]} | grep $hname &>/dev/null
+                        then
+                            clear
+                            tput cup 2 0
+                            echo "输入的主机名已存在，请重新输入："
+                            tput cup 5 0
+                            continue
+                        else
+                            echo "开始克隆虚拟机,请耐心等待......"
+                            #基于模板主机的后备镜像文件创建差异镜像文件      
+                            qemu-img create -f qcow2 -b $PATH_IMG/$SOURCE_HOST.img  $PATH_IMG/$hname.img
+                            cp $PATH_XML/$SOURCE_HOST.xml $PATH_XML/$hname.xml           #拷贝镜像配置文件
+                            #sed -i "s#$SOURCE_HOST.img#$hname.img#g" $PATH_XML/$hname.xml     #修改磁盘映像文件位置
+                            sed -i "s/$SOURCE_HOST/$hname/g" $PATH_XML/$hname.xml     #修改虚拟机名称
+                            def_change_uuid $hname.xml
+                            def_change_mac  $hname.xml
+                            virsh define $PATH_XML/$hname.xml
+                            ###############克隆后eth0会变成eth1,可将模板的eth0配置删除，或者修复一下##################
+                            #echo "$PATH_IMG/$hname.img"
+                            guestmount -a $PATH_IMG/$hname.img -i /mnt
+                            sed -i "/eth0/d" /mnt/etc/udev/rules.d/70-persistent-net.rules
+                            sed -i "s/eth1/eth0/g" /mnt/etc/udev/rules.d/70-persistent-net.rules
+                            sed -ri "s/(HWADDR=)(.*)/\1$mac_new/g" /mnt/etc/sysconfig/network-scripts/ifcfg-eth0
+                            umount /mnt
+                            ##################################################################################
+                            echo "$hname主机克隆完成!"
+                            read -p  "是否还要继续克隆虚拟机:(y/n)" judge
+                            def_judge $judge
+                            if [ $result -eq 0 ]
+                            then
+                                break 2
+                            elif [ $result -eq 2 ]
+                            then
+                                echo "输入错误次数过多，已退出!"
+                                sleep 1
+                                exit
+                            fi
+                        fi
+                    done            
+                ;;
+                q)                   ###########退出选择
+                    break 2
+                ;;
+                *)                      ###########其它选择
+                    echo "输入错误，请重新输入！"
+                    sleep 3
+                    break
+                esac
+            done
+        ;;
+        3)                                      #####3.克隆一组虚拟机
+            echo "请输入要克隆的虚拟机个数:"
+            read -p "请注意,此处只能输入数字:" hosts_num
+            def_is_number $hosts_num
+            echo "您要克隆$hosts_num台虚拟机!"      
+            #选择克隆的方式, 1.基于前台虚拟机的克隆(相当于完整克隆),2.基于后端镜像创建差量镜像(相当于链接克隆)###########
+            echo "克隆方式有两种,1.基于前台虚拟机的克隆;2.基于后端镜像创建差量镜像."
+            echo "选择第一种方式请输入1,选择第二种方式请输入2，#####退出选择请输入q"
+            while true
+            do
+                read -p "请输入您要选择的克隆方式：" mode_oper
+                case $mode_oper in
+                1)                      ######选择第一种方式
+                    clear
+                    while true
+                    do
+                        arr_host_list=(`virsh list --all |sed '1,2d'|sed '/^$/d' |awk '{print $2}'`)
+                        #clear
+                        virsh list --all
+                        echo "请输入您要克隆主机的主机名。注意，上面列举的为已存在的主机，请不要输入重复的主机名！"
+                        read -p "您要克隆的主机名和虚拟机名称将会以您输入的主机名后加编号来命名,例如zabbix-3:" hname
+                        def_is_null $hname
+                        if echo ${arr_host_list[@]} | grep $hname &>/dev/null
+                        then
+                            clear
+                            tput cup 2 0
+                            echo "输入的主机名已存在，请重新输入："
+                            tput cup 5 0
+                            continue
+                        else
+                            for ((i=1;i<=$hosts_num;i++))
+                            do
+                                clear
+                                echo "开始克隆虚拟机$hname-$i,请耐心等待......"
+                                virt-clone -o $SOURCE_HOST -n $hname-$i -f $PATH_IMG/$hname-$i.img
+                                echo "$hname-$i主机克隆完成!"
+                                sleep 1
+                            done
+                            break 2
+                        fi
+                    done
+                ;;
+                2)                      ######选择第二种方式
+                    clear
+                    while true
+                    do
+                        arr_host_list=(`virsh list --all |sed '1,2d'|sed '/^$/d' |awk '{print $2}'`)
+                        #clear
+                        virsh list --all
+                        echo "请输入您要克隆主机的主机名。注意，上面列举的为已存在的主机，请不要输入重复的主机名！"
+                        read -p "您要克隆的主机名和虚拟机名称将会以您输入的主机名后加编号来命名,例如zabbix-3:" hname
+                        def_is_null $hname
+                        if echo ${arr_host_list[@]} | grep $hname &>/dev/null
+                        then
+                            clear
+                            tput cup 2 0
+                            echo "输入的主机名已存在，请重新输入："
+                            tput cup 5 0
+                            continue
+                        else
+                            for ((i=1;i<=$hosts_num;i++))
+                            do
+                                echo "开始克隆虚拟机$hname-$i,请耐心等待......"
+                                #基于模板主机的后备镜像文件创建差异镜像文件 
+                                qemu-img create -f qcow2 -b $PATH_IMG/$SOURCE_HOST.qcow2  $PATH_IMG/$hname-$i.img
+                                cp $PATH_XML/$SOURCE_HOST.xml $PATH_XML/$hname-$i.xml           #拷贝镜像配置文件
+                                sed -i "s#$PATH_IMG/$SOURCE_HOST.qcow2#$PATH_IMG/$hname-$i.img#g" $PATH_XML/$hname-$i.xml    #修改磁盘映像文件位置
+                                sed -i "s/$SOURCE_HOST/$hname-$i/g" $PATH_XML/$hname-$i.xml   #修改虚拟机名称
+                                def_change_uuid $hname-$i.xml
+                                def_change_mac $hname-$i.xml
+                                virsh define $PATH_XML/$hname-$i.xml
+                                echo "$hname-$i主机克隆完成!"
+                                sleep 1
+                            done
+                            break 2
+                        fi
+                    done            
+                ;;
+                q)                   #####退出选择
+                    break 2
+                ;;
+                *)                      #####其它选择
+                    echo "输入错误，请重新输入！"
+                    sleep 3
+                    break
+                esac
+            done
+        ;;
+        4)                                      #####返回主界面
+            break;;
+        5)                                      #####退出
+            exit;;
+        *)                                      #####输入错误，退出
+            echo "输入错误，返回到主界面！"
+            sleep 1
+            break 2
+        esac
+    done
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~克隆虚拟机函数~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~启动虚拟机函数~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_start_content(){
+    ###################启动内容函数,填写方框内选项###########################################
+    unset list_                #取消定义数组list_
+    ##将每一行的内容写入到数组
+    list_[0]="1.列举所有虚拟机"
+    list_[1]="2.启动所有虚拟机"
+    list_[2]="3.启动一台虚拟机"
+    list_[3]="4.启动一组虚拟机"
+    list_[4]="5.返回主界面"
+    list_[5]="6.退出"
+}
+def_start_host(){
+    while true
+    do
+        def_frame                               ###调用边框函数
+        def_start_content                       ###调用启动内容函数
+        def_print_content                       ###调用打印内容函数
+        echo
+        tput cup $(($screen_line/5+$inface_line+7)) $(($screen_col/4))      
+        echo "您要执行的操作为${list_[$oper_num-1]}"
+        shangxiajuzhong                         ###光标上下居中
+        case $oper_num in
+        1)                                      ####1.列举所有虚拟机
+            virsh list --all
+            read -p "按任意键返回打开虚拟机操作：" start_null
+            tput sc                         ###保存光标位置
+        ;;
+        2)                                      #####2.启动所有虚拟机
+            for i in `virsh list --all |sed '1,2d' |sed '/^$/d'|awk '{print $2}'`
+            do
+                virsh start $i   2>/dev/null
+            done
+            sleep 1
+            virsh list --all
+            echo "虚拟机已全部打开，2s后返回主界面。"
+            sleep 2
+            break
+        ;;
+        3)                                      #####3.启动一台虚拟机
+            ######将每台虚拟机名字定义到一个数组中，启动时输入编号即可启动对应的虚拟机，要开启此功能需要再次修改脚本#######
+            inputtims_start_hnum=0
+            while true
+            do
+                def_host_list
+				read -p "请输入你要启动虚拟机的序号：" hnum             ####需要判断输入的是否正确
+                def_is_number $hnum
+                if [ $isnum_times != 0 ]
+                then
+                    inputtims_start_hnum=$[$inputtims_start_hnum+1]
+                    if [ $inputtims_start_hnum -le 5 ]
+                    then
+                        continue
+                    else
+                        echo "输入错误次数过多，已退出！"
+                        exit
+                    fi
+                fi
+				if [ $hnum -gt 0 ] && [ $hnum -le $arr_host_list_num ]
+				then
+				    hname=${arr_host_list[$hnum-1]}
+				    virsh start $hname
+				    virsh list
+					echo "$hname虚拟机已经打开"
+				else
+				    inputtims_start_hnum=$[$inputtims_start_hnum+1]
+				    if [ $inputtims_start_hnum -le 5 ]
+				    then
+                        clear
+                        shangxiajuzhong
+				        echo "输入有误，请重新输入！"
+				        continue
+				    else
+				        echo "输入错误次数过多，已退出！"
+				        exit
+				    fi
+				fi
+                read -p  "是否还要继续打开虚拟机:(y/n)" judge
+                def_judge $judge
+                if [ $result -eq 0 ]
+                then
+                    break
+                elif [ $result -eq 2 ]
+                then
+                    echo "输入错误次数过多，已退出!"
+                    sleep 1
+                    exit
+                fi
+            done
+        ;;
+        4)
+            echo "功能正在完善，敬请期待！";;
+        5)                                      #####返回主界面
+            break;;
+        6)                                      #####退出
+            exit;;
+        *)                                      #####输入错误，退出
+            echo "输入错误，返回到主界面！"
+            sleep 1
+            break 2
+        esac
+    done
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~启动虚拟机函数~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~关闭虚拟机函数~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_stop_content(){
+    ###################填写方框内选项###########################################
+    unset list_                #取消定义数组list_
+    ##将每一行的内容写入到数组
+    list_[0]="1.列举所有虚拟机"
+    list_[1]="2.关闭所有虚拟机"
+    list_[2]="3.关闭一台虚拟机"
+    list_[3]="4.关闭一组虚拟机"
+    list_[4]="5.返回主界面"
+    list_[5]="6.退出"
+}
+def_stop_host(){
+    while true
+    do
+        def_frame                               ###调用边框函数
+        def_stop_content                        ###调用关闭内容函数
+        def_print_content                       ###调用打印内容函数
+        echo
+        tput cup $(($screen_line/5+$inface_line+7)) $(($screen_col/4))      
+        echo "您要执行的操作为${list_[$oper_num-1]}"
+        shangxiajuzhong                         ###光标上下居中
+        case $oper_num in
+        1)                                      ####1.列举所有虚拟机
+            virsh list --all
+            read -p "按任意键返回关闭虚拟机操作：" stop_null
+            tput sc                         ###保存光标位置
+        ;;
+        2)                                      #####2.关闭所有虚拟机
+            for i in `virsh list --all |sed '1,2d' |sed '/^$/d'|awk '{print $2}'`
+            do
+                virsh destroy $i  2>/dev/null
+            done
+            sleep 1
+            virsh list --all
+            echo "虚拟机已全部关闭，2s后返回主界面。"
+            sleep 2
+            break
+        ;;
+        3)                                      #####3.关闭一台虚拟机
+            inputtims_stop_hnum=0
+            while true
+            do
+                def_host_list
+                read -p "请输入你要关闭虚拟机的序号：" hnum             ####需要判断输入的是否正确
+                def_is_number $hnum
+                if [ $isnum_times != 0 ]
+                then
+                    inputtims_stop_hnum=$[$inputtims_stop_hnum+1]
+                    if [ $inputtims_stop_hnum -le 5 ]
+                    then
+                        continue
+                    else
+                        echo "输入错误次数过多，已退出！"
+                        exit
+                    fi
+                fi                
+                if [ $hnum -gt 0 ] && [ $hnum -le $arr_host_list_num ]
+                then
+                    hname=${arr_host_list[$hnum-1]}
+                    virsh destroy $hname
+                    virsh list
+                    echo "$hname虚拟机已经关闭"
+                else
+                    inputtims_stop_hnum=$[$inputtims_stop_hnum+1]
+                    if [ $inputtims_stop_hnum -le 5 ]
+                    then
+                        clear
+                        shangxiajuzhong
+                        echo "输入有误，请重新输入！"
+                        continue
+                    else
+                        echo "输入错误次数过多，已退出！"
+                        exit
+                    fi
+                fi
+                read -p  "是否还要继续关闭虚拟机:(y/n)" judge
+                def_judge $judge
+                if [ $result -eq 0 ]
+                then
+                    break
+                elif [ $result -eq 2 ]
+                then
+                    echo "输入错误次数过多，已退出!"
+                    sleep 1
+                    exit
+                fi
+            done
+        ;;
+        4)
+            echo "功能正在完善，敬请期待！";;
+        5)                                       #####返回主界面
+            break;;
+        6)                                      #####退出
+            exit;;
+        *)                                      #####输入错误，退出
+            echo "输入错误，返回到主界面！"
+            sleep 1
+            break 2
+        esac
+    done
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~关闭虚拟机函数~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~删除虚拟机函数~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_delete_content(){
+    ###################填写方框内选项###########################################
+    unset list_                #取消定义数组list_
+    ##将每一行的内容写入到数组
+    list_[0]="1.列举所有虚拟机"
+    list_[1]="2.删除所有虚拟机"
+    list_[2]="3.删除一台虚拟机"
+    list_[3]="4.删除一组虚拟机"
+    list_[4]="5.返回主界面"
+    list_[5]="6.退出"
+}
+def_delete_host(){
+    while true
+    do
+        def_frame                               ###调用边框函数
+        def_delete_content                      ###调用删除内容函数
+        def_print_content                       ###调用打印内容函数
+        echo
+        tput cup $(($screen_line/5+$inface_line+7)) $(($screen_col/4))      
+        echo "您要执行的操作为${list_[$oper_num-1]}"
+        shangxiajuzhong                         ###光标上下居中
+        case $oper_num in
+        1)                                      ####1.列举所有虚拟机
+            virsh list --all
+            read -p "按任意键返回删除虚拟机操作：" delete_null
+            tput sc                         ###保存光标位置
+        ;;
+        2)                                      #####2.删除所有虚拟机
+            read -p  "删除虚拟机后，所有虚拟机将无法找回，确认要删除吗?确认请输入y,取消请输入n:"  judge1
+            def_judge $judge1
+            if [ $result -eq 1 ]
+            then
+                result_delete1=0
+            elif [ $result -eq 0 ]
+            then
+                result_delete1=1
+                echo "退出删除所有虚拟机！"
+                sleep 1
+                continue
+            else
+                echo "输入错误次数过多，已退出！"
+                sleep 1
+                exit
+            fi
+            read -p  "是否要取消删除全部虚拟机的操作?取消删除请输入y,确认删除请输入n:"  judge2
+            def_judge $judge2
+            if [ $result -eq 1 ]
+            then
+                result_delete2=0
+                echo "退出删除所有虚拟机！"
+                sleep 1
+                continue               
+            elif [ $result -eq 0 ]
+            then
+                result_delete2=1
+            else
+                echo "输入错误次数过多，已退出！"
+                sleep 1
+                exit
+            fi
+            if [ $result_delete1 -eq 0 ] && [ $result_delete2 -eq 1 ]
+            then
+                echo "开始删除全部虚拟机..."
+                for i in `virsh list --all |sed '1,2d' |sed '/^$/d'|awk '{print $2}'`
+                do
+                    virsh destroy $i
+                    virsh undefine $i
+                    rm -rf $PATH_IMG/$i.img
+                    echo "$i 主机删除完成！"
+                    sleep 1
+                done
+            fi
+            virsh list --all
+            echo "虚拟机已全部删除，返回主界面。"
+            sleep 1
+        ;;
+        3)                                      #####3.删除一台虚拟机
+            inputtims_delete_hnum=0
+            while true
+            do
+                def_host_list
+                read -p "请输入你要删除虚拟机的序号：" hnum             ####需要判断输入的是否正确
+                def_is_number $hnum
+                if [ $isnum_times != 0 ]
+                then
+                    inputtims_delete_hnum=$[$inputtims_delete_hnum+1]
+                    if [ $inputtims_delete_hnum -le 5 ]
+                    then
+                        continue
+                    else
+                        echo "输入错误次数过多，已退出！"
+                        exit
+                    fi
+                fi
+                if [ $hnum -gt 0 ] && [ $hnum -le $arr_host_list_num ]
+                then
+                    hname=${arr_host_list[$hnum-1]}
+                    virsh destroy $hname &>/dev/null
+                    virsh undefine $hname &>/dev/null
+                    rm -rf $PATH_IMG/$hname.img
+                    virsh list --all
+                    echo "$hname虚拟机已经删除"
+                else
+                    inputtims_delete_hnum=$[$inputtims_delete_hnum+1]
+                    if [ $inputtims_delete_hnum -le 5 ]
+                    then
+                        clear
+                        shangxiajuzhong
+                        echo "输入有误，请重新输入！"
+                        continue
+                    else
+                        echo "输入错误次数过多，已退出！"
+                        exit
+                    fi
+                fi
+                read -p  "是否还要继续删除虚拟机:(y/n)" judge
+                def_judge $judge
+                if [ $result -eq 0 ]
+                then
+                    break
+                elif [ $result -eq 2 ]
+                then
+                    echo "输入错误次数过多，已退出!"
+                    sleep 1
+                    exit
+                fi
+            done
+        ;;
+        4)
+            echo "功能正在完善，敬请期待！";;
+        5)                                       #####返回主界面
+            break;;
+        6)                                      #####退出
+            exit;;
+        *)                                      #####输入错误，退出
+            echo "输入错误，返回到主界面！"
+            break 2
+        esac
+    done
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~删除虚拟机函数~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~迁移虚拟机函数~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_move_host(){
+    echo "功能正在完善，敬请期待！"
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~迁移虚拟机函数~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~修改虚拟机配置函数~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_modify_content(){
+    ###################修改内容函数：填写方框内选项###########################################
+    unset list_                #取消定义数组list_
+    ##将每一行的内容写入到数组
+    list_[0]="1.修改虚拟机ip地址"
+    list_[1]="2.增加虚拟机hosts文件内容"
+    list_[2]="3.开启虚拟机串口连接"
+    list_[3]="4.修改虚拟机主机名"
+    list_[4]="5.返回主界面"
+    list_[5]="6.退出"
+}
+def_modify_host(){
+    inputtims_modify_hnum=0
+    while true
+    do
+        def_host_list
+        read -p "请输入你要修改虚拟机的序号：" hnum
+        def_is_number $hnum
+        if [ $isnum_times != 0 ]
+        then
+            inputtims_modify_hnum=$[$inputtims_modify_hnum+1]
+            if [ $inputtims_modify_hnum -le 5 ]
+            then
+                continue
+            else
+                echo "输入错误次数过多，已退出！"
+                exit
+            fi
+        fi
+        if [ $hnum -gt 0 ] && [ $hnum -le $arr_host_list_num ]
+        then
+            hname=${arr_host_list[$hnum-1]}
+            himg=`ls $PATH_IMG/ | egrep ^$hname.'(qcow2|img)'$`
+            echo "此功能是使用将镜像文件挂载到物理机的空目录下，通过直接修改虚拟机配置文件来修改系统配置。"
+            echo "因此，虚拟机必须处于关机状态，否则，不能修改！"
+            sleep 1
+            def_is_shutdown $hname
+            guestmount -a $PATH_IMG/$himg -i /mnt                      #将虚拟机镜像挂载到/mnt目录下
+            df -h
+            read -p "任意键开始编辑：" is_mou_mnt
+            while true
+            do
+                def_frame                               ###调用边框函数
+                def_modify_content                      ###调用修改内容函数
+                def_print_content                       ###调用打印内容函数
+                echo
+                tput cup $(($screen_line/5+$inface_line+7)) $(($screen_col/4))      
+                echo "您要执行的操作为${list_[$oper_num-1]}"
+                shangxiajuzhong                         ###光标上下居中
+                case $oper_num in 
+                1)                                                          #修改虚拟机ip地址
+                    echo "此脚本修改的是/etc/sysconfig/network-scripts/或者/etc/network/interface下的配置文件，如果虚拟机不支持通过修改此文件夹下的配置文件修改ip地址，则此脚本不适用。"
+                    PATH_ipaddr1=/mnt/etc/sysconfig/network-scripts
+                    PATH_ipaddr2=/mnt/etc/network/interfaces
+                    if [ -d $PATH_ipaddr1 ]
+                    then
+                        read -p "请输入虚拟机新的ip：" ipaddr_new
+                        def_is_ipaddr $ipaddr_new
+                        read -p "请输入虚拟机新的子网掩码：(255.255.255.0)" netmask_new
+                        if [ "$netmask_new" == "" ]
+                        then
+                            netmask_new=255.255.255.0
+                        fi
+                        read -p "请输入虚拟机新的网卡名称：(eth0)" if_new
+                        if [ "$if_new" == "" ]
+                        then
+                            if_new=eth0
+                        fi
+                        sed -i "/ONBOOT=/s/no/yes/g" $PATH_ipaddr1/ifcfg-$if_new
+                        sed -i "/BOOTPROTO=/s/dhcp/none/g" $PATH_ipaddr1/ifcfg-$if_new
+                        sed -i "/IPADDR/d" $PATH_ipaddr1/ifcfg-$if_new
+                        sed -i "/NETMASK/d" $PATH_ipaddr1/ifcfg-$if_new
+                        sed -i "/DNS/d" $PATH_ipaddr1/ifcfg-$if_new
+                        sed -i "/GATEWAY/d" $PATH_ipaddr1/ifcfg-$if_new
+                        echo "IPADDR=$ipaddr_new" >>$PATH_ipaddr1/ifcfg-$if_new
+                        echo "NETMASK=$netmask_new" >>$PATH_ipaddr1/ifcfg-$if_new
+                    elif [ -f $PATH_ipaddr2 ]
+                    then
+                        read -p "请输入虚拟机新的ip：" ipaddr_new
+                        def_is_ipaddr $ipaddr_new
+                        read -p "请输入虚拟机新的子网掩码：(255.255.255.0) " netmask_new
+                        if [ "$netmask_new" == "" ]
+                        then
+                            netmask_new=255.255.255.0
+                        fi
+                        read -p "请输入虚拟机新的网卡名称：(eth0)" if_new
+                        if [ "$if_new" == "" ]
+                        then
+                            if_new=eth0
+                        fi
+                        read -p "请输入虚拟机新的网关：" gateway_new
+                        gateway_old=`grep -A 7 "auto eth0" $PATH_ipaddr2 | grep gateway`
+                        if [ "$gateway_new" != "" ]
+                        then
+                            gateway=$gateway_new
+                            mv $PATH_ipaddr2 $PATH_ipaddr2.bak
+                            cat > $PATH_ipaddr2 << EOF
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+auto $if_new
+iface $if_new inet static
+     address $ipaddr_new
+     netmask $netmask_new
+     gateway $gateway
+EOF
+                        else
+                            mv $PATH_ipaddr2 $PATH_ipaddr2.bak
+                            cat > $PATH_ipaddr2 << EOF
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+auto $if_new
+iface $if_new inet static
+     address $ipaddr_new
+     netmask $netmask_new
+EOF
+                        fi
+                    else
+                        echo "此虚拟机不支持使用此脚本修改ip地址，请手动修改！"
+                        break 
+                    fi
+                    read -p  "是否还要继续修改其它配置:(y/n)" judge
+                    def_judge $judge
+                    if [ $result -eq 0 ]
+                    then
+                        echo "结束编辑，取消挂载！"
+                        umount /mnt
+                        break
+                    elif [ $result -eq 2 ]
+                    then
+                        echo "输入错误次数过多，已退出!"
+                        umount /mnt
+                        sleep 1
+                        exit
+                    fi 
+                ;;
+                2)                                  ####增加虚拟机hosts文件内容
+                    PATH_hosts=/mnt/etc/hosts
+                    read -p "请输入要添加的主机的ip地址：" hostip_new
+                    def_is_ipaddr $hostip_new
+                    read -p "请输入要添加的主机的主机名：" hostname_new
+                    def_is_null $hostname_new
+                    read -p "请输入要添加的主机的简称：" hostname_short
+                    sed -i "/$hostip_new/d" $PATH_hosts
+                    echo "$hostip_new   $hostname_new   $hostname_short" >>$PATH_hosts      #添加到虚拟机hosts文件中
+                    sed -i "/$hostip_new/d" /etc/hosts
+                    echo "$hostip_new   $hostname_new   $hostname_short" >>/etc/hosts       #添加到宿主机hosts文件中
+                    read -p  "是否还要继续修改其它配置:(y/n)" judge
+                    def_judge $judge
+                    if [ $result -eq 0 ]
+                    then
+                        echo "结束编辑，取消挂载！"
+                        umount /mnt
+                        break
+                    elif [ $result -eq 2 ]
+                    then
+                        echo "输入错误次数过多，已退出!"
+                        umount /mnt
+                        sleep 1
+                        exit
+                    fi 
+                ;;
+                3)                                              #####开启虚拟机串口连接
+                    grub_file=`\ls /mnt/boot/grub{,2}/grub.{cfg,conf} 2>/dev/null`
+                    if [ -f /mnt/proc/version ]
+                    then
+                        kernel_info=`cat /mnt/proc/version | awk '{print $3}'`
+                    else
+                        if [ `ls /mnt/boot/| grep config |sed "s/config-//g"|wc -l` -eq 1 ]
+                        then
+                            kernel_info=`ls /mnt/boot/| grep config |sed "s/config-//g"`
+                        else
+                            echo "未获取到此虚拟机的内核信息！"
+                        fi
+                    fi
+                    if [ -f $grub_file ]
+                    then
+                        sed -i "/$kernel_info/s/quiet/quiet console=ttyS0/g" $grub_file 2>/dev/null
+                        grep "console=ttyS0" $grub_file
+                        if [ $? -eq 0 ]
+                        then
+                            echo "修改成功！"
+                        else
+                            echo "修改失败！"
+                        fi
+                        sleep 1
+                    else
+                        echo "此虚拟机不支持使用此脚本开启串口！"
+                    fi
+                    read -p  "是否还要继续修改其它配置:(y/n)" judge
+                    def_judge $judge
+                    if [ $result -eq 0 ]
+                    then
+                        umount /mnt
+                        break
+                    elif [ $result -eq 2 ]
+                    then
+                        echo "输入错误次数过多，已退出!"
+                        umount /mnt
+                        sleep 1
+                        exit
+                    fi 
+                ;;
+                4)
+                    echo "此脚本修改的是/etc/hostname或者/etc/sysconfig/network文件，如果虚拟机不支持通过修改此文件夹下的配置文件修改ip地址，则此脚本不适用。"
+                    PATH_hostname1=/mnt/etc/sysconfig/network
+                    PATH_hostname2=/mnt/etc/hostname
+                    read -p "请输入新的主机名:"  hostname_new
+                    def_is_null hostname_new
+                    read -p "请输入新的主机域名:" areaname_new
+                    if [ "$areaname_new" != "" ]
+                    then
+                        if grep ^HOSTNAME $PATH_hostname1 &>/dev/null
+                        then
+                            sed -ri "/^HOSTNAME/s/(HOSTNAME=)(.*)/\1$hostname_new.$areaname_new/g" $PATH_hostname1
+                        elif [ -f $PATH_hostname2 ]
+                        then
+                            echo $hostname_new.$areaname_new >$PATH_hostname2
+                        else
+                            echo "此虚拟机不支持使用此脚本修改主机名，请手动修改！"
+                        fi
+                    else
+                        if grep ^HOSTNAME $PATH_hostname1 &>/dev/null
+                        then
+                            sed -ri "/^HOSTNAME/s/(HOSTNAME=)(.*)/\1$hostname_new/g" $PATH_hostname1
+                        elif [ -f $PATH_hostname2 ]
+                        then
+                            echo $hostname_new >$PATH_hostname2
+                        else
+                            echo "此虚拟机不支持使用此脚本修改主机名，请手动修改！"
+                        fi
+                    fi
+                    read -p  "是否还要继续修改其它配置:(y/n)" judge
+                    def_judge $judge
+                    if [ $result -eq 0 ]
+                    then
+                        echo "结束编辑，取消挂载！"
+                        umount /mnt
+                        break
+                    elif [ $result -eq 2 ]
+                    then
+                        echo "输入错误次数过多，已退出!"
+                        umount /mnt
+                        sleep 1
+                        exit
+                    fi 
+                ;;
+                5)
+                    umount /mnt
+                    break 2
+                ;;
+                6)
+                    umount /mnt
+                    exit
+                ;;
+                *)                                      #####输入错误，退出
+                    umount /mnt
+                    echo "输入错误，返回到主界面！"
+                    break 2
+                esac
+            done
+        else
+            inputtims_modify_hnum=$[$inputtims_modify_hnum+1]
+            if [ $inputtims_modify_hnum -le 5 ]
+            then
+                clear
+                shangxiajuzhong
+                echo "输入有误，请重新输入！"
+                continue
+            else
+                echo "输入错误次数过多，已退出！"
+                exit
+            fi
+        fi
+        read -p  "是否还要继续修改其它虚拟机:(y/n)" judge
+        def_judge $judge
+        if [ $result -eq 0 ]
+        then
+            break
+        elif [ $result -eq 2 ]
+        then
+            echoread -p  "输入错误次数过多，已退出!"
+            sleep 1
+            exit
+        fi        
+    done
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~修改虚拟机配置函数~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~自定义脚本变量函数~~~~~~~BEGIN~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+def_cust_env(){
+    echo "开始自定义脚本变量！"
+    read -p "请输入虚拟机镜像文件的位置：（/home/Disk-e/kvmimags）" PATH_IMG
+    if [ "$PATH_IMG" == "" ]
+    then
+        PATH_IMG=/home/Disk-e/kvmimags
+    fi
+    read -p "请输入操作系统安装镜像的位置：（/home/Disk-e/Packages）" PATH_ISO
+    if [ "$PATH_ISO" == "" ]
+    then
+        PATH_ISO=/home/Disk-e/Packages
+    fi
+    read -p "请输入ks文件的位置：（/home/phishaul）" PATH_KS
+    if [ "$PATH_KS" == "" ]
+    then
+        PATH_KS=/home/phishaul
+    fi    
+    read -p "请输入操作系统安装镜像的名称：（CentOS-7.4.iso）" NANE_ISO
+    if [ "$NANE_ISO" == "" ]
+    then
+        NANE_ISO=CentOS-7.4.iso
+    fi 
+    read -p "请输入创建虚拟机时，内存的最小值：（1024）" MEM_MIN_SIZE
+    if [ "$MEM_MIN_SIZE" == "" ]
+    then
+        MEM_MIN_SIZE=1024
+    fi 
+    read -p "请输入创建虚拟机时，内存的最大值：（2048）" MEM_MAX_SIZE
+    if [ "$MEM_MAX_SIZE" == "" ]
+    then
+        MEM_MAX_SIZE=4
+    fi 
+    read -p "请输入创建虚拟机时，CPU的最小个数：（1）" CPU_MIN_NUM
+    if [ "$CPU_MIN_NUM" == "" ]
+    then
+        CPU_MIN_NUM=1
+    fi 
+    read -p "请输入创建虚拟机时，CPU的最大个数：（4）" CPU_MAX_NUM
+    if [ "$CPU_MAX_NUM" == "" ]
+    then
+        CPU_MAX_NUM=4
+    fi 
+    read -p "请输入创建虚拟机时，硬盘的大小：（8）" DISK_SIZE
+    if [ "$DISK_SIZE" == "" ]
+    then
+        DISK_SIZE=8
+    fi 
+    read -p "请输入创建虚拟机时，需要选择的网络连接方式：（virbr1）" BIRDGE_MODE
+    if [ "$BIRDGE_MODE" == "" ]
+    then
+        BIRDGE_MODE=virbr1
+    fi 
+    read -p "请输入虚拟机配置文件的位置：（/etc/libvirt/qemu）" PATH_XML
+    if [ "$PATH_XML" == "" ]
+    then
+        PATH_XML=/etc/libvirt/qemu
+    fi 
+    read -p "请输入母版虚拟机的名称：（kylin3.2）" SOURCE_HOST
+    if [ "$SOURCE_HOST" == "" ]
+    then
+        SOURCE_HOST=kylin3.2
+    fi 
+    #echo "自定义完成，本次自定义的变量只适用于本次执行脚本中，如果需要永久修改，请自行修改脚本中变量值！"
+    read -p  "自定义完成，是否要永久修改：(y/n)" judge
+    def_judge $judge
+    if [ $result -eq 1 ]
+    then
+        sed -i "s#/home/Disk-e/kvmimags#$PATH_IMG#g" $0
+        sed -i "s#/home/Disk-e/Packages#$PATH_ISO#g" $0
+        sed -i "s#/home/phishaul#$PATH_KS#g" $0
+        sed -i "s#CentOS-7.4.iso#$NANE_ISO#g" $0
+        sed -i "s#1024#$MEM_MIN_SIZE#g" $0
+        sed -i "s#4#$CPU_MAX_NUM#g" $0
+        sed -i "s#CPU_MIN_NUM=1#CPU_MIN_NUM=$CPU_MIN_NUM#g" $0
+        sed -i "s#（1）#（$CPU_MIN_NUM）#g" $0
+        sed -i "s#CPU_MAX_NUM=4#CPU_MAX_NUM=$CPU_MAX_NUM#g" $0
+        sed -i "s#（4）#（$CPU_MAX_NUM）#g" $0
+        sed -i "s#DISK_SIZE=8#DISK_SIZE=$DISK_SIZE#g" $0
+        sed -i "s#（8）#（$DISK_SIZE）#g" $0
+        sed -i "s#virbr1#$BIRDGE_MODE#g" $0
+        sed -i "s#/etc/libvirt/qemu#$PATH_XML#g" $0
+        sed -i "s#kylin3.2#$SOURCE_HOST#g" $0
+    elif [ $result -eq 2 ]
+    then
+        echo "输入错误次数过多，已退出!"
+        sleep 1
+        exit
+    fi
+}
+##########~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~自定义脚本变量函数~~~~~~~END~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~####################
+##########～～～～～～～～～～～～～～～～～～～～开始执行～～～～～～～～～～～～～～～～～～～～～～～～～####################
+def_frame
+tput cup $(($screen_line/5+2)) $(($screen_col/4+2)) 
+echo "      ########--------KVM管理脚本-------############"
+tput cup $(($screen_line/5+4)) $(($screen_col/4+2)) 
+echo "1.此脚本是为了管理KVM虚拟机,使用前请保证已正确安装KVM相关程序。"
+tput cup $(($screen_line/5+5)) $(($screen_col/4+2)) 
+echo "2.屏幕缩小到不足以容纳管理界面字符数时,会出现字符超出界面的问题,"
+tput cup $(($screen_line/5+6)) $(($screen_col/4+2)) 
+echo "  拉宽界面,重新运行脚本即可解决。"
+tput cup $(($screen_line/5+7)) $(($screen_col/4+2)) 
+echo "3.脚本中用到的KVM管理命令都需要root权限,因此,此脚本需要以root"
+tput cup $(($screen_line/5+8)) $(($screen_col/4+2)) 
+echo "  权限执行。"
+tput cup $(($screen_line/5+9)) $(($screen_col/4+2)) 
+echo "4.第一次使用此脚本，请自定义脚本变量。"
+tput cup $(($screen_line/5+$inface_line-2)) $(($screen_col/4+2)) 
+echo "                                     By Phishaul 2020年8月20日开始"
+tput cup $(($screen_line/5+$inface_line+2)) $(($screen_col/4+2)) 
+read -p "按任意键开始执行！" notic_null
+clear
+############～～～～～～～～～～～～～～～～～判断脚本环境变量～～～～～～～～BEGIN～～～～～～～～～～～～##################
+if [ ! -d $PATH_IMG ]
+then
+    echo "$PATH_IMG路径不存在,请重新定义PATH_IMG变量！"
+fi
+if [ ! -d $PATH_ISO ]
+then
+    echo "$PATH_ISO路径不存在,请重新定义PATH_ISO变量！"
+fi
+if [ ! -f $PATH_ISO/$NANE_ISO ]
+then
+    echo "$NANE_ISO文件不存在,请重新定义NANE_ISO变量！"
+fi
+if [ ! -d $PATH_KS ]
+then
+    echo "$PATH_KS路径不存在,请重新定义PATH_KS变量！"
+fi
+if [ ! -d $PATH_XML ]
+then
+    echo "$PATH_XML路径不存在,请重新定义PATH_XML变量！"
+fi
+if [ "$MEM_MIN_SIZE" == "" ]
+then
+    echo "MEM_MIN_SIZE变量未定义,请重新定义此变量！"
+fi
+if [ "$MEM_MAX_SIZE" == "" ]
+then
+    echo "MEM_MAX_SIZE变量未定义,请重新定义此变量！"
+fi
+if [ "$CPU_MIN_NUM" == "" ]
+then
+    echo "CPU_MIN_NUM变量未定义,请重新定义此变量！"
+fi
+if [ "$CPU_MAX_NUM" == "" ]
+then
+    echo "CPU_MAX_NUM变量未定义,请重新定义此变量！"
+fi
+if [ "$DISK_SIZE" == "" ]
+then
+    echo "DISK_SIZE变量未定义,请重新定义此变量！"
+fi
+virsh list --all | sed "1,2d"| sed "/^$/d"|awk '{print $2}' | grep $SOURCE_HOST
+if [ "echo $?" == "1" ]
+then
+    echo "$SOURCE_HOST不存在,请重新定义SOURCE_HOST变量！"
+fi
+ip a |sed -n "/BROADCAST/p" |awk -F: '{print $2}' |grep $BIRDGE_MODE
+if [ "echo $?" == "1" ]
+then
+    echo "$BIRDGE_MODE不存在,请重新定义BIRDGE_MODE变量！"
+fi
+############～～～～～～～～～～～～～～～～～判断脚本环境变量～～～～～～～～END～～～～～～～～～～～～##################
+
+while true
+do
+    def_home                   #########执行首页管理界面函数###########
+done
+
